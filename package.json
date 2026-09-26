@@ -1,0 +1,24 @@
+{
+  "name": "pi-openrouter-request-details",
+  "version": "1.0.0",
+  "description": "Pi extension that shows which provider and model OpenRouter actually served for each request, with live per-provider pricing and per-turn cost cards.",
+  "keywords": ["pi-package", "pi", "openrouter"],
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p pi/tsconfig.json"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "~0.87.0",
+    "@earendil-works/pi-tui": "~0.87.0",
+    "@types/node": "22.19.21",
+    "typescript": "5.9.3"
+  },
+  "pi": {
+    "extensions": ["./pi"]
+  }
+}

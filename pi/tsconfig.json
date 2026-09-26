@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "es2022",
+    "lib": ["es2022"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "verbatimModuleSyntax": true,
+    "typeRoots": ["../node_modules/@types"],
+    "paths": {
+      "@earendil-works/pi-coding-agent": ["../node_modules/@earendil-works/pi-coding-agent"],
+      "@earendil-works/pi-tui": ["../node_modules/@earendil-works/pi-tui"]
+    }
+  },
+  "include": ["index.ts"]
+}
