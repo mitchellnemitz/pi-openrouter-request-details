@@ -1,6 +1,18 @@
 {
   "name": "pi-openrouter-request-details",
   "version": "1.0.0",
+  "author": "Mitchell Nemitz",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mitchellnemitz/pi-openrouter-request-details.git"
+  },
+  "homepage": "https://github.com/mitchellnemitz/pi-openrouter-request-details#readme",
+  "bugs": {
+    "url": "https://github.com/mitchellnemitz/pi-openrouter-request-details/issues"
+  },
+  "files": [
+    "pi"
+  ],
   "description": "Pi extension that shows which provider and model OpenRouter actually served for each request, with live per-provider pricing and per-turn cost cards.",
   "keywords": ["pi-package", "pi", "openrouter"],
   "license": "MIT",

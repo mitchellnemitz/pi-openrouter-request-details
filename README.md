@@ -147,6 +147,12 @@ survives restarts, resume, and `/reload`.
 ## Install
 
 ```
+pi install npm:pi-openrouter-request-details
+```
+
+Or from git:
+
+```
 pi install git:github.com/mitchellnemitz/pi-openrouter-request-details
 ```
 
