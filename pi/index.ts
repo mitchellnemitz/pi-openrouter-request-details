@@ -66,7 +66,19 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
-import { Box, Container, MouseRegion, Spacer, Text, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { Box, Container, Spacer, Text, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+
+// MouseRegion exists only in stock pi's pi-tui; oh-my-pi's has no mouse
+// regions. It is resolved dynamically so the module still loads under omp
+// (a static named import would fail omp's install-time validation), and a
+// missing MouseRegion simply drops click-to-expand there.
+let MouseRegionCtor: any;
+
+// oh-my-pi (omp) detection, set once in the factory. Under omp, custom
+// *entries* persist but never render, so the visible artifacts are emitted
+// as custom *messages* instead (rendered via registerMessageRenderer and
+// stripped from LLM context via the context event); see `emit` in the factory.
+let IS_OMP = false;
 
 const CUSTOM_TYPE = "openrouter-request-details";
 // Per-response header entry: the model/provider that served THAT response,
@@ -536,7 +548,9 @@ class LiveHeaderText implements Component {
             this.last = line;
             this.text.setText(line);
         }
-        return this.box.render(width);
+        // omp's Component.render declares a readonly string[]; copy to mutable
+        // so this string[]-typed return satisfies both hosts' interfaces.
+        return [...this.box.render(width)];
     }
 
     invalidate(): void {
@@ -902,9 +916,109 @@ function usageLine(data: RequestDetailsData, theme: any): RightAlignedText | nul
     );
 }
 
+// Shared renderer bodies for both hosts' registration APIs. Stock registers
+// these per custom *entry* (entry.data), omp per custom *message*
+// (message.details); the bodies are identical.
+function renderFailedBlock(data: FailedRequest | undefined, theme: any): Component | undefined {
+    if (!state.visible || !data) return undefined;
+    const box = new Box(1, 0, infoBgFn(theme));
+    if (data.fetchError) {
+        box.addChild(new Text(`OpenRouter request FAILED (connection): ${data.fetchError.slice(0, 300)}`, 0, 0));
+    } else {
+        box.addChild(new Text(`OpenRouter request FAILED (${data.status})`, 0, 0));
+        box.addChild(new Text(`error: ${data.errorBody?.slice(0, 300) ?? "unknown"}`, 0, 0));
+    }
+    if (data.requestBody) {
+        box.addChild(new Text(`request: ${data.requestBody.slice(0, 600)}`, 0, 0));
+    }
+    return box;
+}
+
+function renderServedBlock(data: ServedHeaderData | undefined, theme: any): Component | undefined {
+    if (!state.visible) return undefined;
+    // Complete header (appended at message_end): render from data, with
+    // the provider's listed rates when the catalog has them.
+    if (data?.served) {
+        const box = new Box(1, 0, infoBgFn(theme));
+        box.addChild(
+            new RightAlignedText(
+                infoRow(
+                    data.served,
+                    data.provider,
+                    ratesSuffix(data.served, data.provider),
+                    theme,
+                    "muted",
+                ),
+            ),
+        );
+        return box;
+    }
+    // Live placeholder for the response currently streaming: a
+    // component that re-reads currentHeader every frame. Anything else -
+    // an empty placeholder on a rebuilt session - renders nothing.
+    if (data && livePlaceholders.has(data)) {
+        return new LiveHeaderText(theme, data.gen ?? 0);
+    }
+    return undefined;
+}
+
 // -- Extension wiring ----------------------------------------------------------
 
-export default function (pi: ExtensionAPI) {
+export default async function (pi: ExtensionAPI) {
+    // Host detection: omp forks the extension API; registerTranscriptPresenter
+    // exists only on its ExtensionAPI. Stock pi awaits async factories before
+    // session_start, so the MouseRegion probe below completes first.
+    IS_OMP = typeof (pi as any).registerTranscriptPresenter === "function";
+    if (!IS_OMP) {
+        try {
+            ({ MouseRegion: MouseRegionCtor } = (await import("@earendil-works/pi-tui")) as any);
+        } catch {
+            MouseRegionCtor = undefined;
+        }
+    }
+
+    // Emit one visible artifact. Stock: custom entries persist and render
+    // live, including mid-stream (placeholder + per-response headers above
+    // the streaming response). omp: entries never render, so visible
+    // artifacts ride custom messages instead - display-only meta the
+    // context handler below strips from the LLM context. Mid-stream
+    // emission is impossible there: a custom message delivered while the
+    // agent streams is an "aside" injection, which omp converts into an
+    // agent continuation - every emitted header would spawn another model
+    // step and loop the turn. So under omp only settle-time artifacts
+    // (cards, failures) are emitted, idle, where default delivery renders
+    // immediately without starting a turn; the per-response header stays a
+    // stock-only nicety, and the card carries the turn's served models.
+    const emit = (type: string, data: unknown, midStream = false) => {
+        if (!IS_OMP) {
+            pi.appendEntry(type, data);
+            return;
+        }
+        if (midStream) return;
+        (pi as any).sendMessage(
+            { customType: type, content: "", display: true, details: data },
+            { triggerTurn: false },
+        );
+    };
+
+    // Under omp the artifacts are custom messages, which the model would
+    // otherwise see as context: strip them (display-only data, same contract
+    // as stock's non-LLM entry type).
+    if (IS_OMP) {
+        const visibleTypes = [CUSTOM_TYPE, SERVED_TYPE, FAILED_TYPE];
+        pi.on("context", async (event: any) => {
+            if (
+                !event.messages.some((m: any) => m.role === "custom" && visibleTypes.includes(m.customType))
+            ) {
+                return;
+            }
+            return {
+                messages: event.messages.filter(
+                    (m: any) => !(m.role === "custom" && visibleTypes.includes(m.customType)),
+                ),
+            };
+        });
+    }
     pi.registerCommand("openrouter-details", {
         description: "Toggle OpenRouter request-details info blocks (capture always continues)",
         getArgumentCompletions: (prefix: string) => {
@@ -970,15 +1084,17 @@ class ClickableSummaryComponent extends Container {
         }
 
         this.addChild(
-            new MouseRegion(box, (event) => {
-                if (event.type === "click" && event.button === "left") {
-                    this.expanded = !this.expanded;
-                    this.renderContent();
-                    this.onToggle?.(this.expanded);
-                    return { handled: true };
-                }
-                return undefined;
-            }),
+            MouseRegionCtor
+                ? new MouseRegionCtor(box, (event: any) => {
+                      if (event.type === "click" && event.button === "left") {
+                          this.expanded = !this.expanded;
+                          this.renderContent();
+                          this.onToggle?.(this.expanded);
+                          return { handled: true };
+                      }
+                      return undefined;
+                  })
+                : box,
         );
     }
 }
@@ -986,70 +1102,50 @@ class ClickableSummaryComponent extends Container {
     const clickOverrides = new WeakMap<object, boolean>();
     const entryGlobalExpanded = new WeakMap<object, boolean>();
 
-    pi.registerEntryRenderer(CUSTOM_TYPE, (entry, options, theme) => {
-        if (!state.visible) return undefined;
-        const data = entry.data as RequestDetailsData;
+    const anyPi = pi as any;
+    if (!IS_OMP) {
+        anyPi.registerEntryRenderer(CUSTOM_TYPE, (entry: any, options: any, theme: any) => {
+            if (!state.visible) return undefined;
+            const data = entry.data as RequestDetailsData;
 
-        // When ctrl+o changes the global expanded state for this entry,
-        // clear the individual click override so the global action takes precedence.
-        const lastGlobal = entryGlobalExpanded.get(entry);
-        if (lastGlobal !== undefined && lastGlobal !== options.expanded) {
-            clickOverrides.delete(entry);
-        }
-        entryGlobalExpanded.set(entry, options.expanded);
+            // When ctrl+o changes the global expanded state for this entry,
+            // clear the individual click override so the global action takes precedence.
+            const lastGlobal = entryGlobalExpanded.get(entry);
+            if (lastGlobal !== undefined && lastGlobal !== options.expanded) {
+                clickOverrides.delete(entry);
+            }
+            entryGlobalExpanded.set(entry, options.expanded);
 
-        const initialExpanded = clickOverrides.get(entry) ?? options.expanded;
+            const initialExpanded = clickOverrides.get(entry) ?? options.expanded;
 
-        return new ClickableSummaryComponent(data, theme, initialExpanded, (expanded) => {
-            clickOverrides.set(entry, expanded);
+            return new ClickableSummaryComponent(data, theme, initialExpanded, (expanded) => {
+                clickOverrides.set(entry, expanded);
+            });
         });
-    });
 
-    pi.registerEntryRenderer(FAILED_TYPE, (entry, _opts, theme) => {
-        if (!state.visible) return undefined;
-        const data = entry.data as FailedRequest | undefined;
-        if (!data) return undefined;
-        const box = new Box(1, 0, infoBgFn(theme));
-        if (data.fetchError) {
-            box.addChild(new Text(`OpenRouter request FAILED (connection): ${data.fetchError.slice(0, 300)}`, 0, 0));
-        } else {
-            box.addChild(new Text(`OpenRouter request FAILED (${data.status})`, 0, 0));
-            box.addChild(new Text(`error: ${data.errorBody?.slice(0, 300) ?? "unknown"}`, 0, 0));
-        }
-        if (data.requestBody) {
-            box.addChild(new Text(`request: ${data.requestBody.slice(0, 600)}`, 0, 0));
-        }
-        return box;
-    });
+        anyPi.registerEntryRenderer(FAILED_TYPE, (entry: any, _opts: any, theme: any) => {
+            return renderFailedBlock(entry.data as FailedRequest | undefined, theme);
+        });
 
-    pi.registerEntryRenderer(SERVED_TYPE, (entry, _opts, theme) => {
-        if (!state.visible) return undefined;
-        const data = entry.data as ServedHeaderData | undefined;
-        // Complete header (appended at message_end): render from data, with
-        // the provider's listed rates when the catalog has them.
-        if (data?.served) {
-            const box = new Box(1, 0, infoBgFn(theme));
-            box.addChild(
-                new RightAlignedText(
-                    infoRow(
-                        data.served,
-                        data.provider,
-                        ratesSuffix(data.served, data.provider),
-                        theme,
-                        "muted",
-                    ),
-                ),
-            );
-            return box;
-        }
-        // Live placeholder for the response currently streaming: a
-        // component that re-reads currentHeader every frame. Anything else -
-        // an empty placeholder on a rebuilt session - renders nothing.
-        if (data && livePlaceholders.has(data)) {
-            return new LiveHeaderText(theme, data.gen ?? 0);
-        }
-        return undefined;
-    });
+        anyPi.registerEntryRenderer(SERVED_TYPE, (entry: any, _opts: any, theme: any) => {
+            return renderServedBlock(entry.data as ServedHeaderData | undefined, theme);
+        });
+    } else {
+        // omp's registerMessageRenderer serves custom messages; the payload
+        // rides the message's details field. No click override is possible
+        // without MouseRegion, so the card follows the global expanded state.
+        const omp = pi as any;
+        omp.registerMessageRenderer(CUSTOM_TYPE, (message: any, options: any, theme: any) => {
+            if (!state.visible) return undefined;
+            return new ClickableSummaryComponent(message.details as RequestDetailsData, theme, options.expanded);
+        });
+        omp.registerMessageRenderer(FAILED_TYPE, (message: any, _opts: any, theme: any) => {
+            return renderFailedBlock(message.details as FailedRequest | undefined, theme);
+        });
+        omp.registerMessageRenderer(SERVED_TYPE, (message: any, _opts: any, theme: any) => {
+            return renderServedBlock(message.details as ServedHeaderData | undefined, theme);
+        });
+    }
 
     pi.on("message_start", async (event) => {
         const m = event.message;
@@ -1063,7 +1159,7 @@ class ClickableSummaryComponent extends Container {
         currentHeader = { gen: ++headerGen };
         const placeholder: ServedHeaderData = { gen: headerGen };
         livePlaceholders.add(placeholder);
-        pi.appendEntry(SERVED_TYPE, placeholder);
+        emit(SERVED_TYPE, placeholder, true);
     });
 
     pi.on("message_update", async (event) => {
@@ -1076,7 +1172,8 @@ class ClickableSummaryComponent extends Container {
         // Detached: never hold up the stream for display data.
         void lookupServed(m.responseId).then((info) => {
             if (currentHeader !== h) return; // stream ended or new request
-            h.served = info?.model || m.responseModel || m.model;
+            const responseModel: string | undefined = (m as any).responseModel;
+            h.served = info?.model || responseModel || m.model;
             if (info?.provider) h.provider = info.provider;
             // Warm the rates catalog for whatever actually served this.
             void ensureRates(h.served, h.provider);
@@ -1096,7 +1193,7 @@ class ClickableSummaryComponent extends Container {
 
         turnRequests.push({
             requested: m.model,
-            responseModel: m.responseModel || undefined,
+            responseModel: ((m as any).responseModel as string | undefined) || undefined,
             responseId: m.responseId,
             usage: m.usage
                 ? {
@@ -1116,7 +1213,8 @@ class ClickableSummaryComponent extends Container {
         let provider = h?.provider;
         if (!served || !provider) {
             const info = await lookupServed(m.responseId);
-            served = served || info?.model || m.responseModel || m.model;
+            const responseModel: string | undefined = (m as any).responseModel;
+            served = served || info?.model || responseModel || m.model;
             provider = provider || info?.provider;
         }
         currentHeader = null; // blanks the live placeholder
@@ -1124,10 +1222,10 @@ class ClickableSummaryComponent extends Container {
         // kicked by this very response); never wait longer than a blink.
         void ensureRates(served, provider);
         await ratesReady(served);
-        pi.appendEntry(SERVED_TYPE, {
+        emit(SERVED_TYPE, {
             served,
             ...(provider ? { provider } : {}),
-        });
+        }, true);
     });
 
     pi.on("session_start", async (_event: unknown, ctx: any) => {
@@ -1155,12 +1253,12 @@ class ClickableSummaryComponent extends Container {
         currentHeader = null;
     });
 
-    pi.on("agent_settled", async () => {
+    const onSettled = async () => {
         const failures = (state.errors ?? []).slice(state.reportedErrorCount ?? 0);
         state.reportedErrorCount = (state.errors ?? []).length;
         for (const failure of failures) {
             try {
-                pi.appendEntry(FAILED_TYPE, failure);
+                emit(FAILED_TYPE, failure);
             } catch {
                 // stale context - the entry still lands next turn
             }
@@ -1173,24 +1271,37 @@ class ClickableSummaryComponent extends Container {
         );
         const merged = mergeTurn(requests, infos);
         if (merged.every((item) => !item.suspect)) {
-            appendCard(pi, buildCardData(merged));
+            appendCard(emit, buildCardData(merged));
             return;
         }
         // Some requests need the generation-record fallback. Run it detached:
         // the session is usable immediately, and the card appends when the
         // records land (or with best-available data once the poll gives up).
         void correctSuspects(merged)
-            .then((fixed) => appendCard(pi, buildCardData(fixed)))
-            .catch(() => appendCard(pi, buildCardData(merged)));
-    });
+            .then((fixed) => appendCard(emit, buildCardData(fixed)))
+            .catch(() => appendCard(emit, buildCardData(merged)));
+    };
+
+    // Stock settles at agent_settled; omp has no settled event - its
+    // agent_end.willContinue/awaitingAsyncWork flag the same terminal
+    // boundary (both false = no automatic continuation remains).
+    // omp declares no agent_settled event, so its overload list rejects the
+    // name even though the call is gated to stock at runtime.
+    (pi as any).on("agent_settled", onSettled);
+    if (IS_OMP) {
+        (pi as any).on("agent_end", async (event: any) => {
+            if (event?.willContinue || event?.awaitingAsyncWork) return;
+            await onSettled();
+        });
+    }
 }
 
 // Appending is safe outside event handlers (pi only rejects calls on a stale
 // context after session replacement or /reload); still guard, so a delayed
 // card never throws into an already-settled turn.
-function appendCard(pi: ExtensionAPI, data: RequestDetailsData) {
+function appendCard(emit: (type: string, data: unknown, midStream?: boolean) => void, data: RequestDetailsData) {
     try {
-        pi.appendEntry(CUSTOM_TYPE, data);
+        emit(CUSTOM_TYPE, data);
     } catch {
         // stale context (session replaced / reloaded mid-lookup) - drop the card
     }
