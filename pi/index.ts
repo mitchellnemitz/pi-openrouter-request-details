@@ -1040,7 +1040,7 @@ export default async function (pi: ExtensionAPI) {
             } else if (arg === "on") {
                 state.display = "all";
             } else if (arg) {
-                ctx.ui.notify("usage: /openrouter-details [all|summary|off]", "error");
+                ctx.ui.notify("usage: /openrouter-details [all|summary|off] (on = all)", "error");
                 return;
             } else {
                 // No argument: cycle all -> summary -> off -> all.
