@@ -1,6 +1,6 @@
 {
   "name": "pi-openrouter-request-details",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "author": "Mitchell Nemitz",
   "repository": {
     "type": "git",
@@ -14,7 +14,11 @@
     "pi"
   ],
   "description": "Pi extension that shows which provider and model OpenRouter actually served for each request, with live per-provider pricing and per-turn cost cards.",
-  "keywords": ["pi-package", "pi", "openrouter"],
+  "keywords": [
+    "pi-package",
+    "pi",
+    "openrouter"
+  ],
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -31,6 +35,8 @@
     "typescript": "5.9.3"
   },
   "pi": {
-    "extensions": ["./pi"]
+    "extensions": [
+      "./pi"
+    ]
   }
 }
