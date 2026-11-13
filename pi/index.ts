@@ -88,12 +88,18 @@ const CUSTOM_TYPE = "openrouter-request-details";
 // session file (entry order: header, then message).
 const SERVED_TYPE = "openrouter-request-details:served";
 const FAILED_TYPE = "openrouter-request-details:failed";
-// Display preference. Appended whenever /openrouter-details flips visibility:
-// the data entries above are always captured and persisted regardless, this
-// only records whether the renderers should draw them. Read back at
+// Display preference. Appended whenever /openrouter-details changes the
+// display mode: the data entries above are always captured and persisted
+// regardless, this only records which renderers should draw. Read back at
 // session_start so the preference survives restarts (and /reload, via the
 // shared state below).
 const DISPLAY_TYPE = "openrouter-request-details:display";
+
+// What renders. "all": headers, failure blocks, and the per-turn summary
+// card. "summary": only the card - inline blocks (per-response headers and
+// failure blocks) are hidden but the turn summary stays. "off": nothing.
+// Capture runs identically in every mode.
+type DisplayMode = "all" | "summary" | "off";
 
 // One per-response header: the model and provider that served THAT response.
 // `served` is optional because a placeholder entry (appended at
@@ -177,7 +183,7 @@ interface TeeState {
     rateGeneration?: number;
     errors?: FailedRequest[];
     reportedErrorCount?: number;
-    visible?: boolean;
+    display?: DisplayMode;
 }
 
 // Bump when wrapFetch's behavior changes: /reload re-imports the module, and
@@ -203,7 +209,7 @@ state.rateAttempts = new Map();
 // rateFetches entry (which would suppress revalidation).
 state.rateGeneration = (state.rateGeneration ?? 0) + 1;
 state.errors ??= [];
-state.visible ??= true;
+state.display ??= "all";
 
 // Bound the map: gen ids are unique per request, so long sessions would
 // otherwise grow it without end.
@@ -920,7 +926,7 @@ function usageLine(data: RequestDetailsData, theme: any): RightAlignedText | nul
 // these per custom *entry* (entry.data), omp per custom *message*
 // (message.details); the bodies are identical.
 function renderFailedBlock(data: FailedRequest | undefined, theme: any): Component | undefined {
-    if (!state.visible || !data) return undefined;
+    if (state.display !== "all" || !data) return undefined;
     const box = new Box(1, 0, infoBgFn(theme));
     if (data.fetchError) {
         box.addChild(new Text(`OpenRouter request FAILED (connection): ${data.fetchError.slice(0, 300)}`, 0, 0));
@@ -935,7 +941,7 @@ function renderFailedBlock(data: FailedRequest | undefined, theme: any): Compone
 }
 
 function renderServedBlock(data: ServedHeaderData | undefined, theme: any): Component | undefined {
-    if (!state.visible) return undefined;
+    if (state.display !== "all") return undefined;
     // Complete header (appended at message_end): render from data, with
     // the provider's listed rates when the catalog has them.
     if (data?.served) {
@@ -1020,25 +1026,29 @@ export default async function (pi: ExtensionAPI) {
         });
     }
     pi.registerCommand("openrouter-details", {
-        description: "Toggle OpenRouter request-details info blocks (capture always continues)",
+        description: "Set OpenRouter request-details display mode: all, summary (card only), or off (capture always continues)",
         getArgumentCompletions: (prefix: string) => {
-            const envs = ["on", "off"].filter((v) => v.startsWith(prefix));
+            const envs = ["all", "summary", "off", "on"].filter((v) => v.startsWith(prefix));
             return envs.length > 0
                 ? envs.map((v) => ({ value: v, label: v }))
                 : null;
         },
         handler: async (args, ctx) => {
             const arg = args?.trim().toLowerCase();
-            if (arg === "on" || arg === "off") {
-                state.visible = arg === "on";
+            if (arg === "all" || arg === "summary" || arg === "off") {
+                state.display = arg;
+            } else if (arg === "on") {
+                state.display = "all";
             } else if (arg) {
-                ctx.ui.notify("usage: /openrouter-details [on|off]", "error");
+                ctx.ui.notify("usage: /openrouter-details [all|summary|off] (on = all)", "error");
                 return;
             } else {
-                state.visible = !state.visible;
+                // No argument: cycle all -> summary -> off -> all.
+                state.display =
+                    state.display === "all" ? "summary" : state.display === "summary" ? "off" : "all";
             }
             try {
-                pi.appendEntry(DISPLAY_TYPE, { visible: state.visible });
+                pi.appendEntry(DISPLAY_TYPE, { display: state.display });
             } catch {
                 // stale context - the toggle still applies to this session
             }
@@ -1049,8 +1059,14 @@ export default async function (pi: ExtensionAPI) {
             // every mounted component and re-runs all entry renderers under
             // the new flag - the same rebuild pi's own ctrl+t toggle gets.
             ctx.ui.setTheme(ctx.ui.theme);
+            const shown =
+                state.display === "all"
+                    ? "shown"
+                    : state.display === "summary"
+                        ? "summary only (inline blocks hidden)"
+                        : "hidden";
             ctx.ui.notify(
-                `OpenRouter request details ${state.visible ? "shown" : "hidden"} (capture continues)`,
+                `OpenRouter request details ${shown} (capture continues)`,
                 "info",
             );
         },
@@ -1105,7 +1121,7 @@ class ClickableSummaryComponent extends Container {
     const anyPi = pi as any;
     if (!IS_OMP) {
         anyPi.registerEntryRenderer(CUSTOM_TYPE, (entry: any, options: any, theme: any) => {
-            if (!state.visible) return undefined;
+            if (state.display === "off") return undefined;
             const data = entry.data as RequestDetailsData;
 
             // When ctrl+o changes the global expanded state for this entry,
@@ -1136,7 +1152,7 @@ class ClickableSummaryComponent extends Container {
         // without MouseRegion, so the card follows the global expanded state.
         const omp = pi as any;
         omp.registerMessageRenderer(CUSTOM_TYPE, (message: any, options: any, theme: any) => {
-            if (!state.visible) return undefined;
+            if (state.display === "off") return undefined;
             return new ClickableSummaryComponent(message.details as RequestDetailsData, theme, options.expanded);
         });
         omp.registerMessageRenderer(FAILED_TYPE, (message: any, _opts: any, theme: any) => {
@@ -1232,13 +1248,14 @@ class ClickableSummaryComponent extends Container {
         turnRequests = [];
         currentHeader = null;
         // Restore the display preference: last display entry in the file wins.
+        // Legacy entries store { visible: boolean }; map them to the mode.
         for (const entry of ctx?.sessionManager?.getEntries?.() ?? []) {
-            if (
-                entry.type === "custom" &&
-                entry.customType === DISPLAY_TYPE &&
-                typeof (entry.data as any)?.visible === "boolean"
-            ) {
-                state.visible = (entry.data as any).visible;
+            if (entry.type !== "custom" || entry.customType !== DISPLAY_TYPE) continue;
+            const d = entry.data as any;
+            if (d?.display === "all" || d?.display === "summary" || d?.display === "off") {
+                state.display = d.display;
+            } else if (typeof d?.visible === "boolean") {
+                state.display = d.visible ? "all" : "off";
             }
         }
         // Warm the rates catalog for the startup model so the first header
