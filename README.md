@@ -136,13 +136,22 @@ pollute what gets sent to the model.
 
 ## Toggling the display
 
-`/openrouter-details` flips whether the info blocks (per-response headers,
-turn cards, failure blocks) are drawn in the transcript. Capture is
-unaffected: every block is still captured and saved to the session file
-exactly as before — only the rendering is suppressed. `/openrouter-details
-on` and `/openrouter-details off` set it explicitly. The preference persists
-in the session file (as an `openrouter-request-details:display` entry), so it
-survives restarts, resume, and `/reload`.
+`/openrouter-details` cycles the display mode: **all** → **summary** →
+**off** → all. Capture is unaffected in every mode: every block is still
+captured and saved to the session file exactly as before — only the rendering
+is suppressed.
+
+- `all` — everything renders: per-response headers, failure blocks, and the
+  per-turn summary card.
+- `summary` — only the per-turn summary card renders; the inline blocks
+  (per-response headers and failure blocks) are hidden.
+- `off` — nothing renders.
+
+`/openrouter-details all`, `summary`, and `off` set the mode explicitly
+(`on` is accepted as an alias for `all`). The preference persists in the
+session file (as an `openrouter-request-details:display` entry), so it
+survives restarts, resume, and `/reload`. Sessions written by older versions
+of the extension (which stored a boolean) restore as `all` or `off`.
 
 ## Install
 
